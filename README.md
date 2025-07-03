@@ -2,8 +2,6 @@
 
 A lightweight Telegram alerter for [Komodo](https://komododev.io/).
 
----
-
 ## Example Notification
 
 ```
