@@ -1,0 +1,48 @@
+# Dependencies
+node_modules
+npm-debug.log*
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Git
+.git
+.gitignore
+
+# Documentation
+README.md
+*.md
+
+# IDE files
+.vscode
+.idea
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+logs
+*.log
+
+# Runtime data
+pids
+*.pid
+*.seed
+*.pid.lock
+
+# Optional npm cache directory
+.npm
+
+# Optional REPL history
+.node_repl_history
+
+# Output of 'npm pack'
+*.tgz
+
+# Yarn Integrity file
+.yarn-integrity

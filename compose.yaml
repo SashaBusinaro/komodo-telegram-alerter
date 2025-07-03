@@ -1,0 +1,8 @@
+---
+services:
+  komodo-telegram-alerter:
+    image: sashabusinaro/komodo-telegram-alerter:latest
+    container_name: komodo-telegram-alerter
+    restart: unless-stopped
+    ports:
+      - '3000:3000'
