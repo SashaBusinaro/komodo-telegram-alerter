@@ -68,7 +68,7 @@ In Komodo, add a Custom Alerter with the following URL:
 
 `http://<komodo-telegram-alerter-ip>:3000/alert?token=<TELEGRAM_TOKEN>&chat_id=<TELEGRAM_CHAT_ID>`
 
-Or, to make use of Komodo interpolation:
+Or, leverage Komodo's interpolation:
 
 `http://<komodo-telegram-alerter-ip>:3000/alert?token=[[TELEGRAM_TOKEN]]&chat_id=[[TELEGRAM_CHAT_ID]]`
 
