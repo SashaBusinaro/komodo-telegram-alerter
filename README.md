@@ -1,6 +1,6 @@
 # Komodo Telegram Alerter
 
-A lightweight Telegram alerter for [Komodo](https://komododev.io/).
+A lightweight Telegram alerter for [Komodo](https://komo.do).
 
 ## Example Notification
 
@@ -72,7 +72,7 @@ Or, leverage Komodo's interpolation:
 
 `http://<komodo-telegram-alerter-ip>:3000/alert?token=[[TELEGRAM_TOKEN]]&chat_id=[[TELEGRAM_CHAT_ID]]`
 
-**Recommended**: Use [Komodo Secrets & Variables](https://docs.komododev.io/configuration/secrets/) to store your Telegram credentials.
+**Recommended**: Use [Komodo Secrets & Variables](https://komo.do/docs/variables) to store your Telegram credentials.
 
 <details>
 <summary>Traefik Example</summary>
