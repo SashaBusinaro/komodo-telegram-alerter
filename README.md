@@ -74,6 +74,29 @@ Or, leverage Komodo's interpolation:
 
 **Recommended**: Use [Komodo Secrets & Variables](https://komo.do/docs/variables) to store your Telegram credentials.
 
+### Proxy Support
+
+If your server requires a proxy to reach the Telegram API, set the standard proxy environment variable:
+
+```
+HTTPS_PROXY=http://proxy:8080
+```
+
+All standard variants are supported: `HTTPS_PROXY`, `https_proxy`, `HTTP_PROXY`, `http_proxy`.
+
+Example with Docker Compose:
+
+```yaml
+services:
+  komodo-telegram-alerter:
+    image: sashabusinaro/komodo-telegram-alerter:latest
+    restart: unless-stopped
+    ports:
+      - '3000:3000'
+    environment:
+      HTTPS_PROXY: http://proxy:8080
+```
+
 <details>
 <summary>Traefik Example</summary>
 
