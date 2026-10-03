@@ -1,6 +1,7 @@
 import express from 'express';
 import bodyParser from 'body-parser';
 import fetch from 'node-fetch';
+import { HttpsProxyAgent } from 'https-proxy-agent';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -29,6 +30,9 @@ app.post('/alert', async (req, res) => {
   const alertInfoData = alertData.data?.data || { info: 'No alert data available' };
   const resolved = alertData.resolved ? '✅' : '❌';
 
+  const proxyUrl = process.env.HTTPS_PROXY || process.env.https_proxy || process.env.HTTP_PROXY || process.env.http_proxy;
+  const agent = proxyUrl ? new HttpsProxyAgent(proxyUrl) : undefined;
+
   const levelEmoji = {
     'CRITICAL': '🔴',
     'ERROR': '🚨',
@@ -46,6 +50,7 @@ app.post('/alert', async (req, res) => {
     const response = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
+      agent,
       body: JSON.stringify({
         chat_id,
         text: message,
