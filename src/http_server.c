@@ -58,6 +58,8 @@ struct http_server {
 
     pthread_t *threads;
     size_t num_threads;
+    size_t busy_workers;
+    size_t available_workers;
 };
 
 static int hex_val(char c) {
@@ -196,6 +198,8 @@ static const char *status_reason(int status) {
         return "Payload Too Large";
     case 414:
         return "URI Too Long";
+    case 429:
+        return "Too Many Requests";
     case 431:
         return "Request Header Fields Too Large";
     case 500:
@@ -209,6 +213,8 @@ static const char *status_reason(int status) {
 
 static void send_json_raw(int fd, int status, const char *json_body) {
     size_t body_len = strlen(json_body);
+    const char *retry_after =
+        (status == 429 || status == 503) ? "Retry-After: 1\r\n" : "";
     char header[512];
     int hlen = snprintf(header, sizeof(header),
                         "HTTP/1.1 %d %s\r\n"
@@ -216,8 +222,9 @@ static void send_json_raw(int fd, int status, const char *json_body) {
                         "Content-Length: %zu\r\n"
                         "Connection: close\r\n"
                         "X-Content-Type-Options: nosniff\r\n"
-                        "Cache-Control: no-store\r\n\r\n",
-                        status, status_reason(status), body_len);
+                        "Cache-Control: no-store\r\n"
+                        "%s\r\n",
+                        status, status_reason(status), body_len, retry_after);
     if (hlen <= 0 || (size_t)hlen >= sizeof(header)) {
         return;
     }
@@ -879,12 +886,17 @@ static void *worker_main(void *arg) {
     http_server_t *srv = (http_server_t *)arg;
     telegram_client_t tg;
     if (!telegram_client_init(&tg, srv->cfg)) {
+        pthread_mutex_lock(&srv->mu);
+        if (srv->available_workers > 0) {
+            srv->available_workers--;
+        }
+        pthread_mutex_unlock(&srv->mu);
         log_error("Failed to initialize Telegram client in worker");
         return NULL;
     }
 
+    pthread_mutex_lock(&srv->mu);
     for (;;) {
-        pthread_mutex_lock(&srv->mu);
         while (srv->queue.count == 0 && !atomic_load(&srv->stopping)) {
             pthread_cond_wait(&srv->not_empty, &srv->mu);
         }
@@ -895,9 +907,13 @@ static void *worker_main(void *arg) {
         client_conn_t conn = srv->queue.items[srv->queue.head];
         srv->queue.head = (srv->queue.head + 1) % QUEUE_CAPACITY;
         srv->queue.count--;
+        srv->busy_workers++;
         pthread_mutex_unlock(&srv->mu);
 
         handle_client(conn.fd, conn.peer, srv->cfg, &tg);
+
+        pthread_mutex_lock(&srv->mu);
+        srv->busy_workers--;
     }
 
     telegram_client_destroy(&tg);
@@ -1022,6 +1038,8 @@ http_server_t *http_server_create(const app_config_t *cfg) {
         return NULL;
     }
 
+    srv->available_workers = cfg->worker_threads;
+
     for (size_t i = 0; i < cfg->worker_threads; i++) {
         if (pthread_create(&srv->threads[i], NULL, worker_main, srv) != 0) {
             http_server_signal_stop(srv);
@@ -1092,16 +1110,29 @@ void http_server_run(http_server_t *srv) {
                                       peer_len, peer, sizeof(peer));
 
                 pthread_mutex_lock(&srv->mu);
-                if (srv->queue.count >= QUEUE_CAPACITY) {
+                size_t in_flight = srv->busy_workers + srv->queue.count;
+                size_t available = srv->available_workers;
+                if (in_flight >= available ||
+                    srv->queue.count >= QUEUE_CAPACITY) {
                     pthread_mutex_unlock(&srv->mu);
-                    log_error("Connection queue full (%d/%d), rejecting client "
-                              "with 503 (from=%s)",
-                              QUEUE_CAPACITY, QUEUE_CAPACITY, peer);
+                    log_error("All workers busy (%zu/%zu), rejecting client "
+                              "with 429 (from=%s)",
+                              in_flight, available, peer);
                     (void)set_blocking_cloexec(client_fd);
                     struct timeval tv = {.tv_sec = 1, .tv_usec = 0};
                     (void)setsockopt(client_fd, SOL_SOCKET, SO_SNDTIMEO, &tv,
                                      sizeof(tv));
-                    send_json_error(client_fd, 503, "Server busy");
+                    send_json_error(client_fd, 429,
+                                    "Too many requests, try again later");
+                    (void)shutdown(client_fd, SHUT_WR);
+                    (void)set_nonblock_cloexec(client_fd);
+                    char drain_buf[4096];
+                    for (int i = 0; i < 4; i++) {
+                        if (recv(client_fd, drain_buf, sizeof(drain_buf), 0) <=
+                            0) {
+                            break;
+                        }
+                    }
                     close(client_fd);
                     continue;
                 }

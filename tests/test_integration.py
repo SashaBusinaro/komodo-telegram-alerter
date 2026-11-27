@@ -288,35 +288,54 @@ def main():
                 ),
             )
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=16) as pool:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
             results = list(pool.map(send_burst_req, range(64)))
         for kind, (st, resp_data) in results:
             assert st == 200, (kind, st, resp_data)
         with state.lock:
             assert len(state.requests) == 48, len(state.requests)
 
-        # 12. Queue saturation (503 Server busy) and recovery
+        # 12. Worker saturation (429 Too Many Requests) and recovery
         with state.lock:
             state.delay_sec = 0.25
 
         def send_slow_alert(idx: int):
+            req = urllib.request.Request(
+                f"{base_url}/alert?token=12345:ABC_def-1&chat_id=-10042",
+                data=json.dumps({"level": "INFO", "data": {"type": f"Sat{idx}"}}).encode("utf-8"),
+                method="POST",
+            )
+            req.add_header("Content-Type", "application/json")
             try:
-                return http_req(
-                    "POST",
-                    f"{base_url}/alert?token=12345:ABC_def-1&chat_id=-10042",
-                    body=json.dumps({"level": "INFO", "data": {"type": f"Sat{idx}"}}),
-                    headers={"Content-Type": "application/json"},
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    return (
+                        resp.status,
+                        json.loads(resp.read().decode("utf-8")),
+                        resp.headers.get("Retry-After"),
+                    )
+            except urllib.error.HTTPError as e:
+                return (
+                    e.code,
+                    json.loads(e.read().decode("utf-8")),
+                    e.headers.get("Retry-After"),
                 )
             except (urllib.error.URLError, ConnectionError, OSError) as exc:
-                # Server closes immediately on 503 before draining POST body,
-                # which can trigger BrokenPipe/ConnectionReset on the client.
-                return (None, {"error": str(exc)})
+                return (None, {"error": str(exc)}, None)
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=80) as pool:
-            sat_results = list(pool.map(send_slow_alert, range(80)))
-        statuses = [st for st, _ in sat_results]
-        assert all(st in (200, 503, None) for st in statuses), sat_results
+        with concurrent.futures.ThreadPoolExecutor(max_workers=20) as pool:
+            sat_results = list(pool.map(send_slow_alert, range(20)))
+        statuses = [st for st, _, _ in sat_results]
+        assert all(st in (200, 429, None) for st in statuses), sat_results
         assert 200 in statuses, sat_results
+        assert 429 in statuses, sat_results
+        for st, body_data, retry_after in sat_results:
+            if st == 429:
+                assert retry_after == "1", (st, body_data, retry_after)
+                assert body_data == {"error": "Too many requests, try again later"}, (
+                    st,
+                    body_data,
+                    retry_after,
+                )
 
         with state.lock:
             state.delay_sec = 0.0
@@ -371,6 +390,7 @@ def main():
         assert 'xff="198.51.100.7", ua="komodo-core/1.0"' in stdout, stdout
         assert "Telegram API error (http=400, from=127.0.0.1:" in stderr, stderr
         assert "Route not found (404): GET /nope (from=127.0.0.1:" in stderr, stderr
+        assert "rejecting client with 429 (from=127.0.0.1:" in stderr, stderr
         for marker in (
             "AddressSanitizer",
             "UndefinedBehaviorSanitizer",

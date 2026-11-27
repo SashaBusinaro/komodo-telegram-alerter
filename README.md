@@ -206,7 +206,7 @@ Pre-built images and local Docker Buildx targets support both `amd64` and Raspbe
 ### Security Highlights
 
 - **Strict input validation**: `token` (`^[0-9]+:[A-Za-z0-9_-]+$`) and `chat_id` (`^-?[0-9]+$` or `^@[A-Za-z0-9_]{5,}$`) are validated before constructing any outbound request; bot tokens are never logged.
-- **Bounded parsing & timeouts**: Enforces maximum URL length (2 KiB), header size (8 KiB), request body size (`MAX_BODY_BYTES`), socket timeouts, Slowloris read deadlines, and a bounded connection queue (`503` when full).
+- **Bounded parsing & timeouts**: Enforces maximum URL length (2 KiB), header size (8 KiB), request body size (`MAX_BODY_BYTES`), socket timeouts, Slowloris read deadlines, and immediate `429 Too Many Requests` (`Retry-After: 1`) rate limiting when all workers are busy.
 - **Hardened outbound `libcurl`**: Enforces TLS peer/host verification, disables redirects, restricts protocols to `https` (unless `TELEGRAM_API_URL` explicitly uses `http://`), and caps response size.
 - **Minimal rootless container footprint**: Multi-stage Alpine image running as pinned numeric UID/GID `10001:10001` (`/sbin/nologin`, SUID/SGID bits stripped, unprivileged port `>= 1024`), compatible with Docker rootless, Podman, Kubernetes `runAsNonRoot: true`, `read_only: true`, and `cap_drop: [ALL]`.
 
