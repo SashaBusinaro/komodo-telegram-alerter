@@ -38,7 +38,7 @@ void telegram_client_destroy(telegram_client_t *client);
  */
 telegram_status_t telegram_send_message(telegram_client_t *client,
                                         const char *token, const char *chat_id,
-                                        const char *message, char *err_buf,
-                                        size_t err_buf_len);
+                                        const char *message, const char *sender,
+                                        char *err_buf, size_t err_buf_len);
 
 #endif /* KOMODO_ALERTER_TELEGRAM_H */

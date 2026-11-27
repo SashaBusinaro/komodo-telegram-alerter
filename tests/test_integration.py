@@ -7,6 +7,7 @@ import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
@@ -103,11 +104,13 @@ def main():
     env.pop("HTTP_PROXY", None)
     env.pop("http_proxy", None)
 
+    stdout_file = tempfile.TemporaryFile(mode="w+", encoding="utf-8")
+    stderr_file = tempfile.TemporaryFile(mode="w+", encoding="utf-8")
     proc = subprocess.Popen(
         [binary],
         env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        stdout=stdout_file,
+        stderr=stderr_file,
         text=True,
     )
 
@@ -129,7 +132,11 @@ def main():
         if not ready:
             if proc.poll() is None:
                 proc.terminate()
-            out, err = proc.communicate(timeout=2)
+            proc.wait(timeout=2)
+            stdout_file.seek(0)
+            stderr_file.seek(0)
+            out = stdout_file.read()
+            err = stderr_file.read()
             raise RuntimeError(f"Server failed to start:\nstdout={out}\nstderr={err}")
 
         # 1. GET /health
@@ -157,7 +164,12 @@ def main():
             "POST",
             f"{base_url}/alert?token=12345:ABC_def&chat_id=-10042",
             body="{not-json",
-            headers={"Content-Type": "application/json"},
+            headers={
+                "Content-Type": "application/json",
+                "X-Forwarded-For": "203.0.113.10, 10.0.0.1",
+                "X-Real-IP": "203.0.113.10",
+                "User-Agent": 'komodo/"test"',
+            },
         )
         assert status == 400 and data == {"error": "Invalid JSON payload"}, (status, data)
 
@@ -179,7 +191,12 @@ def main():
             "POST",
             f"{base_url}/alert?token=12345:ABC_def-1&chat_id=-10042",
             body=json.dumps(komodo_payload),
-            headers={"Content-Type": "application/json"},
+            headers={
+                "Content-Type": "application/json",
+                "X-Forwarded-For": "198.51.100.7",
+                "X-Real-IP": "198.51.100.7",
+                "User-Agent": "komodo-core/1.0",
+            },
         )
         assert status == 200 and data == {"success": True}, (status, data)
         assert len(state.requests) == 1
@@ -336,12 +353,24 @@ def main():
         assert rc == 0, f"Expected exit 0 on SIGTERM under load, got {rc}"
 
         # Ensure bot token was never leaked, verbose diagnostics emitted, and no sanitizer errors
-        stdout, stderr = proc.communicate(timeout=5)
+        stdout_file.seek(0)
+        stderr_file.seek(0)
+        stdout = stdout_file.read()
+        stderr = stderr_file.read()
         assert "ABC_def-1" not in stdout and "ABC_def-1" not in stderr
         assert "Invalid JSON payload:" in stderr, stderr
         assert "at byte offset" in stderr, stderr
         assert "preview=" in stderr, stderr
         assert "[DEBUG]" in stdout, stdout
+        assert "from=127.0.0.1:" in stdout, stdout
+        assert "from=127.0.0.1:" in stderr, stderr
+        assert 'xff="203.0.113.10, 10.0.0.1"' in stderr, stderr
+        assert 'real_ip="203.0.113.10"' in stderr, stderr
+        assert 'ua="komodo/\\"test\\""' in stderr, stderr
+        assert "Message sent successfully (from=127.0.0.1:" in stdout, stdout
+        assert 'xff="198.51.100.7", ua="komodo-core/1.0"' in stdout, stdout
+        assert "Telegram API error (http=400, from=127.0.0.1:" in stderr, stderr
+        assert "Route not found (404): GET /nope (from=127.0.0.1:" in stderr, stderr
         for marker in (
             "AddressSanitizer",
             "UndefinedBehaviorSanitizer",
@@ -354,6 +383,8 @@ def main():
         if proc.poll() is None:
             proc.kill()
             proc.wait()
+        stdout_file.close()
+        stderr_file.close()
         tg_server.shutdown()
         tg_server.server_close()
 

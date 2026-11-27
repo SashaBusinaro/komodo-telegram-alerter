@@ -5,8 +5,17 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <sys/socket.h>
 
 typedef struct http_server http_server_t;
+
+/**
+ * Format a socket address (IPv4 or IPv6) as "ip:port" or "[ip]:port".
+ * Unwraps IPv4-mapped IPv6 addresses (::ffff:a.b.c.d) to "a.b.c.d:port".
+ * Writes "unknown" if addr is NULL, truncated, or uses an unsupported family.
+ */
+void http_format_peer_addr(const struct sockaddr *addr, socklen_t addr_len,
+                           char *out, size_t out_size);
 
 /**
  * Extract and percent-decode a query parameter by exact key name.

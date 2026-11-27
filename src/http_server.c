@@ -10,6 +10,7 @@
 #include <json-c/json.h>
 #include <llhttp.h>
 #include <netdb.h>
+#include <netinet/in.h>
 #include <poll.h>
 #include <pthread.h>
 #include <stdatomic.h>
@@ -25,12 +26,18 @@
 
 #define MAX_URL_BYTES 2048
 #define MAX_HEADER_BYTES 8192
+#define MAX_PEER_ADDR_BYTES 64
 #define QUEUE_CAPACITY 64
 #define SOCKET_TIMEOUT_SEC 5
 #define READ_DEADLINE_SEC 10
 
 typedef struct {
-    int fds[QUEUE_CAPACITY];
+    int fd;
+    char peer[MAX_PEER_ADDR_BYTES];
+} client_conn_t;
+
+typedef struct {
+    client_conn_t items[QUEUE_CAPACITY];
     size_t head;
     size_t tail;
     size_t count;
@@ -241,23 +248,116 @@ static void send_json_error(int fd, int status, const char *err_msg) {
     json_object_put(obj);
 }
 
+void http_format_peer_addr(const struct sockaddr *addr, socklen_t addr_len,
+                           char *out, size_t out_size) {
+    if (out == NULL || out_size == 0) {
+        return;
+    }
+    (void)snprintf(out, out_size, "%s", "unknown");
+    if (addr == NULL) {
+        return;
+    }
+
+    char formatted[MAX_PEER_ADDR_BYTES];
+    int n = -1;
+
+    if (addr->sa_family == AF_INET) {
+        if (addr_len < (socklen_t)sizeof(struct sockaddr_in)) {
+            return;
+        }
+        struct sockaddr_in sin;
+        memcpy(&sin, addr, sizeof(sin));
+        char ip[INET_ADDRSTRLEN];
+        if (inet_ntop(AF_INET, &sin.sin_addr, ip, sizeof(ip)) == NULL) {
+            return;
+        }
+        n = snprintf(formatted, sizeof(formatted), "%s:%u", ip,
+                     (unsigned)ntohs(sin.sin_port));
+    } else if (addr->sa_family == AF_INET6) {
+        if (addr_len < (socklen_t)sizeof(struct sockaddr_in6)) {
+            return;
+        }
+        struct sockaddr_in6 sin6;
+        memcpy(&sin6, addr, sizeof(sin6));
+        static const unsigned char v4_mapped_prefix[12] = {
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff};
+        unsigned port = (unsigned)ntohs(sin6.sin6_port);
+        if (memcmp(sin6.sin6_addr.s6_addr, v4_mapped_prefix,
+                   sizeof(v4_mapped_prefix)) == 0) {
+            struct in_addr v4;
+            memcpy(&v4, &sin6.sin6_addr.s6_addr[12], sizeof(v4));
+            char ip[INET_ADDRSTRLEN];
+            if (inet_ntop(AF_INET, &v4, ip, sizeof(ip)) == NULL) {
+                return;
+            }
+            n = snprintf(formatted, sizeof(formatted), "%s:%u", ip, port);
+        } else {
+            char ip[INET6_ADDRSTRLEN];
+            if (inet_ntop(AF_INET6, &sin6.sin6_addr, ip, sizeof(ip)) == NULL) {
+                return;
+            }
+            n = snprintf(formatted, sizeof(formatted), "[%s]:%u", ip, port);
+        }
+    }
+
+    if (n > 0 && (size_t)n < out_size) {
+        memcpy(out, formatted, (size_t)n + 1);
+    }
+}
+
+typedef enum {
+    HDR_CAPTURE_NONE = 0,
+    HDR_CAPTURE_CONTENT_TYPE,
+    HDR_CAPTURE_X_FORWARDED_FOR,
+    HDR_CAPTURE_X_REAL_IP,
+    HDR_CAPTURE_USER_AGENT
+} header_capture_t;
+
 typedef struct {
     const app_config_t *cfg;
-    char url[MAX_URL_BYTES + 1];
     size_t url_len;
     size_t header_bytes;
-    char content_type[65];
     size_t content_type_len;
-    char header_name[16];
+    size_t x_forwarded_for_len;
+    size_t x_real_ip_len;
+    size_t user_agent_len;
     size_t header_name_len;
-    bool header_field_started;
-    bool capture_content_type;
     char *body;
     size_t body_len;
     size_t body_cap;
-    bool complete;
+    header_capture_t header_capture;
     int error_status;
+    bool header_name_overflow;
+    bool header_field_started;
+    bool complete;
+    char header_name[32];
+    char peer[MAX_PEER_ADDR_BYTES];
+    char content_type[65];
+    char x_real_ip[65];
+    char x_forwarded_for[129];
+    char user_agent[129];
+    char url[MAX_URL_BYTES + 1];
 } req_ctx_t;
+
+static void append_header_value(char *dst, size_t dst_size, size_t *len,
+                                const char *at, size_t n) {
+    if (dst == NULL || dst_size == 0 || len == NULL || *len >= dst_size - 1) {
+        return;
+    }
+    size_t avail = dst_size - 1 - *len;
+    size_t to_copy = n < avail ? n : avail;
+    if (to_copy > 0) {
+        memcpy(dst + *len, at, to_copy);
+        *len += to_copy;
+        dst[*len] = '\0';
+    }
+}
+
+static void trim_trailing_ows(char *buf, size_t *len) {
+    while (*len > 0 && (buf[*len - 1] == ' ' || buf[*len - 1] == '\t')) {
+        buf[--(*len)] = '\0';
+    }
+}
 
 static int on_url_cb(llhttp_t *parser, const char *at, size_t length) {
     req_ctx_t *ctx = (req_ctx_t *)parser->data;
@@ -281,14 +381,18 @@ static int on_header_field_cb(llhttp_t *parser, const char *at, size_t length) {
 
     if (!ctx->header_field_started) {
         ctx->header_name_len = 0;
-        ctx->capture_content_type = false;
+        ctx->header_name_overflow = false;
+        ctx->header_capture = HDR_CAPTURE_NONE;
         ctx->header_field_started = true;
     }
-    for (size_t i = 0;
-         i < length && ctx->header_name_len + 1 < sizeof(ctx->header_name);
-         i++) {
-        ctx->header_name[ctx->header_name_len++] =
-            (char)tolower((unsigned char)at[i]);
+    for (size_t i = 0; i < length; i++) {
+        if (ctx->header_name_len + 1 < sizeof(ctx->header_name)) {
+            ctx->header_name[ctx->header_name_len++] =
+                (char)tolower((unsigned char)at[i]);
+        } else {
+            ctx->header_name_overflow = true;
+            break;
+        }
     }
     return 0;
 }
@@ -296,12 +400,34 @@ static int on_header_field_cb(llhttp_t *parser, const char *at, size_t length) {
 static int on_header_field_complete_cb(llhttp_t *parser) {
     req_ctx_t *ctx = (req_ctx_t *)parser->data;
     ctx->header_field_started = false;
-    ctx->capture_content_type =
-        (ctx->header_name_len == 12 &&
-         memcmp(ctx->header_name, "content-type", 12) == 0);
-    if (ctx->capture_content_type) {
+    ctx->header_capture = HDR_CAPTURE_NONE;
+    if (ctx->header_name_overflow) {
+        return 0;
+    }
+
+    if (ctx->header_name_len == 12 &&
+        memcmp(ctx->header_name, "content-type", 12) == 0) {
+        ctx->header_capture = HDR_CAPTURE_CONTENT_TYPE;
         ctx->content_type_len = 0;
         ctx->content_type[0] = '\0';
+    } else if (ctx->header_name_len == 15 &&
+               memcmp(ctx->header_name, "x-forwarded-for", 15) == 0) {
+        ctx->header_capture = HDR_CAPTURE_X_FORWARDED_FOR;
+        if (ctx->x_forwarded_for_len > 0) {
+            append_header_value(ctx->x_forwarded_for,
+                                sizeof(ctx->x_forwarded_for),
+                                &ctx->x_forwarded_for_len, ", ", 2);
+        }
+    } else if (ctx->header_name_len == 9 &&
+               memcmp(ctx->header_name, "x-real-ip", 9) == 0) {
+        ctx->header_capture = HDR_CAPTURE_X_REAL_IP;
+        ctx->x_real_ip_len = 0;
+        ctx->x_real_ip[0] = '\0';
+    } else if (ctx->header_name_len == 10 &&
+               memcmp(ctx->header_name, "user-agent", 10) == 0) {
+        ctx->header_capture = HDR_CAPTURE_USER_AGENT;
+        ctx->user_agent_len = 0;
+        ctx->user_agent[0] = '\0';
     }
     return 0;
 }
@@ -314,15 +440,48 @@ static int on_header_value_cb(llhttp_t *parser, const char *at, size_t length) {
     }
     ctx->header_bytes += length;
 
-    if (ctx->capture_content_type) {
-        size_t avail = sizeof(ctx->content_type) - 1 - ctx->content_type_len;
-        size_t to_copy = length < avail ? length : avail;
-        if (to_copy > 0) {
-            memcpy(ctx->content_type + ctx->content_type_len, at, to_copy);
-            ctx->content_type_len += to_copy;
-            ctx->content_type[ctx->content_type_len] = '\0';
-        }
+    switch (ctx->header_capture) {
+    case HDR_CAPTURE_CONTENT_TYPE:
+        append_header_value(ctx->content_type, sizeof(ctx->content_type),
+                            &ctx->content_type_len, at, length);
+        break;
+    case HDR_CAPTURE_X_FORWARDED_FOR:
+        append_header_value(ctx->x_forwarded_for, sizeof(ctx->x_forwarded_for),
+                            &ctx->x_forwarded_for_len, at, length);
+        break;
+    case HDR_CAPTURE_X_REAL_IP:
+        append_header_value(ctx->x_real_ip, sizeof(ctx->x_real_ip),
+                            &ctx->x_real_ip_len, at, length);
+        break;
+    case HDR_CAPTURE_USER_AGENT:
+        append_header_value(ctx->user_agent, sizeof(ctx->user_agent),
+                            &ctx->user_agent_len, at, length);
+        break;
+    case HDR_CAPTURE_NONE:
+        break;
     }
+    return 0;
+}
+
+static int on_header_value_complete_cb(llhttp_t *parser) {
+    req_ctx_t *ctx = (req_ctx_t *)parser->data;
+    switch (ctx->header_capture) {
+    case HDR_CAPTURE_CONTENT_TYPE:
+        trim_trailing_ows(ctx->content_type, &ctx->content_type_len);
+        break;
+    case HDR_CAPTURE_X_FORWARDED_FOR:
+        trim_trailing_ows(ctx->x_forwarded_for, &ctx->x_forwarded_for_len);
+        break;
+    case HDR_CAPTURE_X_REAL_IP:
+        trim_trailing_ows(ctx->x_real_ip, &ctx->x_real_ip_len);
+        break;
+    case HDR_CAPTURE_USER_AGENT:
+        trim_trailing_ows(ctx->user_agent, &ctx->user_agent_len);
+        break;
+    case HDR_CAPTURE_NONE:
+        break;
+    }
+    ctx->header_capture = HDR_CAPTURE_NONE;
     return 0;
 }
 
@@ -384,9 +543,61 @@ static int on_message_complete_cb(llhttp_t *parser) {
     return 0;
 }
 
+static void format_sender_info(const req_ctx_t *ctx, char *out,
+                               size_t out_size) {
+    if (out == NULL || out_size == 0) {
+        return;
+    }
+    const char *peer =
+        (ctx != NULL && ctx->peer[0] != '\0') ? ctx->peer : "unknown";
+    int n = snprintf(out, out_size, "from=%s", peer);
+    if (n < 0 || (size_t)n >= out_size) {
+        out[out_size - 1] = '\0';
+        return;
+    }
+    if (ctx == NULL) {
+        return;
+    }
+    size_t off = (size_t)n;
+
+    char xff_preview[97] = {0};
+    if (ctx->x_forwarded_for_len > 0) {
+        log_format_preview(ctx->x_forwarded_for, ctx->x_forwarded_for_len,
+                           xff_preview, sizeof(xff_preview));
+        int w =
+            snprintf(out + off, out_size - off, ", xff=\"%s\"", xff_preview);
+        if (w < 0 || (size_t)w >= out_size - off) {
+            return;
+        }
+        off += (size_t)w;
+    }
+
+    if (ctx->x_real_ip_len > 0) {
+        char rip_preview[65];
+        log_format_preview(ctx->x_real_ip, ctx->x_real_ip_len, rip_preview,
+                           sizeof(rip_preview));
+        if (ctx->x_forwarded_for_len == 0 ||
+            strcmp(rip_preview, xff_preview) != 0) {
+            int w = snprintf(out + off, out_size - off, ", real_ip=\"%s\"",
+                             rip_preview);
+            if (w < 0 || (size_t)w >= out_size - off) {
+                return;
+            }
+            off += (size_t)w;
+        }
+    }
+
+    if (ctx->user_agent_len > 0) {
+        char ua_preview[97];
+        log_format_preview(ctx->user_agent, ctx->user_agent_len, ua_preview,
+                           sizeof(ua_preview));
+        (void)snprintf(out + off, out_size - off, ", ua=\"%s\"", ua_preview);
+    }
+}
+
 static void handle_alert_request(int fd, const req_ctx_t *ctx,
                                  const char *query, size_t query_len,
-                                 telegram_client_t *tg) {
+                                 const char *sender, telegram_client_t *tg) {
     char token[256];
     char chat_id[128];
     bool has_token = false;
@@ -397,8 +608,8 @@ static void handle_alert_request(int fd, const req_ctx_t *ctx,
         !http_query_get_param(query, query_len, "chat_id", chat_id,
                               sizeof(chat_id), &has_chat_id)) {
         memset(token, 0, sizeof(token));
-        log_error("Invalid query encoding on POST /alert (query_len=%zu)",
-                  query_len);
+        log_error("Invalid query encoding on POST /alert (query_len=%zu, %s)",
+                  query_len, sender);
         send_json_error(fd, 400, "Invalid query encoding");
         return;
     }
@@ -407,9 +618,9 @@ static void handle_alert_request(int fd, const req_ctx_t *ctx,
     bool missing_chat = !has_chat_id || chat_id[0] == '\0';
     if (missing_token || missing_chat) {
         memset(token, 0, sizeof(token));
-        log_error("Missing required query parameter(s):%s%s",
-                  missing_token ? " token" : "",
-                  missing_chat ? " chat_id" : "");
+        log_error("Missing required query parameter(s):%s%s (%s)",
+                  missing_token ? " token" : "", missing_chat ? " chat_id" : "",
+                  sender);
         send_json_error(fd, 400, "Missing token or chat_id");
         return;
     }
@@ -418,10 +629,10 @@ static void handle_alert_request(int fd, const req_ctx_t *ctx,
     bool chat_ok = validate_telegram_chat_id(chat_id);
     if (!token_ok || !chat_ok) {
         memset(token, 0, sizeof(token));
-        log_error("Invalid query parameter format:%s%s",
+        log_error("Invalid query parameter format:%s%s (%s)",
                   !token_ok ? " token (expected <digits>:<secret>)" : "",
-                  !chat_ok ? " chat_id (expected numeric ID or @username)"
-                           : "");
+                  !chat_ok ? " chat_id (expected numeric ID or @username)" : "",
+                  sender);
         send_json_error(fd, 400, "Invalid token or chat_id");
         return;
     }
@@ -438,15 +649,15 @@ static void handle_alert_request(int fd, const req_ctx_t *ctx,
                            sizeof(ct_preview));
         log_error(
             "Invalid JSON payload: %s (body_len=%zu, content_type=\"%s\", "
-            "preview=\"%s\")",
+            "preview=\"%s\", %s)",
             err_buf[0] != '\0' ? err_buf : "parse failed", ctx->body_len,
-            ct_preview[0] != '\0' ? ct_preview : "(none)", preview);
+            ct_preview[0] != '\0' ? ct_preview : "(none)", preview, sender);
         send_json_error(fd, 400, "Invalid JSON payload");
         return;
     }
 
-    telegram_status_t st = telegram_send_message(tg, token, chat_id, message,
-                                                 err_buf, sizeof(err_buf));
+    telegram_status_t st = telegram_send_message(
+        tg, token, chat_id, message, sender, err_buf, sizeof(err_buf));
     memset(token, 0, sizeof(token));
     free(message);
 
@@ -455,7 +666,7 @@ static void handle_alert_request(int fd, const req_ctx_t *ctx,
         return;
     }
 
-    log_info("Message sent successfully");
+    log_info("Message sent successfully (%s)", sender);
     send_json_raw(fd, 200, "{\"success\":true}");
 }
 
@@ -486,6 +697,7 @@ static bool read_and_parse_request(int fd, req_ctx_t *ctx,
     settings.on_header_field = on_header_field_cb;
     settings.on_header_field_complete = on_header_field_complete_cb;
     settings.on_header_value = on_header_value_cb;
+    settings.on_header_value_complete = on_header_value_complete_cb;
     settings.on_headers_complete = on_headers_complete_cb;
     settings.on_body = on_body_cb;
     settings.on_message_complete = on_message_complete_cb;
@@ -503,8 +715,11 @@ static bool read_and_parse_request(int fd, req_ctx_t *ctx,
         clock_gettime(CLOCK_MONOTONIC, &now_ts);
         if (now_ts.tv_sec - start_ts.tv_sec >= READ_DEADLINE_SEC) {
             ctx->error_status = 400;
-            log_error("HTTP request read deadline exceeded (%ds, body_len=%zu)",
-                      READ_DEADLINE_SEC, ctx->body_len);
+            char sender[384];
+            format_sender_info(ctx, sender, sizeof(sender));
+            log_error("HTTP request read deadline exceeded (%ds, body_len=%zu, "
+                      "%s)",
+                      READ_DEADLINE_SEC, ctx->body_len, sender);
             return false;
         }
 
@@ -513,7 +728,10 @@ static bool read_and_parse_request(int fd, req_ctx_t *ctx,
             if (errno == EINTR) {
                 continue;
             }
-            log_error("HTTP request read failed: %s", strerror(errno));
+            char sender[384];
+            format_sender_info(ctx, sender, sizeof(sender));
+            log_error("HTTP request read failed: %s (%s)", strerror(errno),
+                      sender);
             return false;
         }
         if (n == 0) {
@@ -522,9 +740,12 @@ static bool read_and_parse_request(int fd, req_ctx_t *ctx,
                 *out_method = llhttp_get_method(&parser);
                 return true;
             }
+            char sender[384];
+            format_sender_info(ctx, sender, sizeof(sender));
             log_error("HTTP request incomplete at EOF: %s (url_len=%zu, "
-                      "body_len=%zu)",
-                      llhttp_errno_name(ferr), ctx->url_len, ctx->body_len);
+                      "body_len=%zu, %s)",
+                      llhttp_errno_name(ferr), ctx->url_len, ctx->body_len,
+                      sender);
             return false;
         }
 
@@ -533,18 +754,21 @@ static bool read_and_parse_request(int fd, req_ctx_t *ctx,
             if (ctx->error_status == 0) {
                 ctx->error_status = 400;
             }
+            char sender[384];
+            format_sender_info(ctx, sender, sizeof(sender));
             if (ctx->error_status == 413) {
                 log_error("HTTP request rejected (413): payload exceeds "
                           "MAX_BODY_BYTES=%zu (content_length=%llu, "
-                          "body_len=%zu)",
+                          "body_len=%zu, %s)",
                           ctx->cfg->max_body_bytes,
                           (unsigned long long)parser.content_length,
-                          ctx->body_len);
+                          ctx->body_len, sender);
             } else {
                 log_error("HTTP request parse error (%d): %s (url_len=%zu, "
-                          "header_bytes=%zu, body_len=%zu)",
+                          "header_bytes=%zu, body_len=%zu, %s)",
                           ctx->error_status, llhttp_errno_name(perr),
-                          ctx->url_len, ctx->header_bytes, ctx->body_len);
+                          ctx->url_len, ctx->header_bytes, ctx->body_len,
+                          sender);
             }
             return false;
         }
@@ -599,40 +823,46 @@ static void dispatch_request(int fd, uint8_t method, const req_ctx_t *ctx,
     const char *query = qmark != NULL ? qmark + 1 : "";
     size_t query_len = qmark != NULL ? ctx->url_len - path_len - 1 : 0;
 
+    char sender[384];
+    format_sender_info(ctx, sender, sizeof(sender));
+
     char path_preview[129];
     log_format_preview(ctx->url, path_len, path_preview, sizeof(path_preview));
     const char *method_str = llhttp_method_name((llhttp_method_t)method);
-    log_debug("Request: %s %s (body_len=%zu)", method_str, path_preview,
-              ctx->body_len);
+    log_debug("Request: %s %s (body_len=%zu, %s)", method_str, path_preview,
+              ctx->body_len, sender);
 
     if (path_len == 7 && memcmp(ctx->url, "/health", 7) == 0) {
         if (method == HTTP_GET) {
             send_json_raw(fd, 200, "{\"status\":\"ok\"}");
         } else {
-            log_error("Method not allowed (405): %s %s", method_str,
-                      path_preview);
+            log_error("Method not allowed (405): %s %s (%s)", method_str,
+                      path_preview, sender);
             send_json_error(fd, 405, "Method not allowed");
         }
     } else if (path_len == 6 && memcmp(ctx->url, "/alert", 6) == 0) {
         if (method == HTTP_POST) {
-            handle_alert_request(fd, ctx, query, query_len, tg);
+            handle_alert_request(fd, ctx, query, query_len, sender, tg);
         } else {
-            log_error("Method not allowed (405): %s %s", method_str,
-                      path_preview);
+            log_error("Method not allowed (405): %s %s (%s)", method_str,
+                      path_preview, sender);
             send_json_error(fd, 405, "Method not allowed");
         }
     } else {
-        log_error("Route not found (404): %s %s", method_str, path_preview);
+        log_error("Route not found (404): %s %s (%s)", method_str, path_preview,
+                  sender);
         send_json_error(fd, 404, "Not found");
     }
 }
 
-static void handle_client(int fd, const app_config_t *cfg,
+static void handle_client(int fd, const char *peer, const app_config_t *cfg,
                           telegram_client_t *tg) {
     configure_client_socket(fd);
 
     req_ctx_t ctx = {0};
     ctx.cfg = cfg;
+    (void)snprintf(ctx.peer, sizeof(ctx.peer), "%s",
+                   (peer != NULL && peer[0] != '\0') ? peer : "unknown");
     uint8_t method = 0;
 
     if (!read_and_parse_request(fd, &ctx, &method)) {
@@ -662,12 +892,12 @@ static void *worker_main(void *arg) {
             pthread_mutex_unlock(&srv->mu);
             break;
         }
-        int client_fd = srv->queue.fds[srv->queue.head];
+        client_conn_t conn = srv->queue.items[srv->queue.head];
         srv->queue.head = (srv->queue.head + 1) % QUEUE_CAPACITY;
         srv->queue.count--;
         pthread_mutex_unlock(&srv->mu);
 
-        handle_client(client_fd, srv->cfg, &tg);
+        handle_client(conn.fd, conn.peer, srv->cfg, &tg);
     }
 
     telegram_client_destroy(&tg);
@@ -841,7 +1071,11 @@ void http_server_run(http_server_t *srv) {
 
         if (pfds[0].revents & POLLIN) {
             for (;;) {
-                int client_fd = accept(srv->listen_fd, NULL, NULL);
+                struct sockaddr_storage peer_addr;
+                memset(&peer_addr, 0, sizeof(peer_addr));
+                socklen_t peer_len = sizeof(peer_addr);
+                int client_fd = accept(
+                    srv->listen_fd, (struct sockaddr *)&peer_addr, &peer_len);
                 if (client_fd < 0) {
                     if (errno == EAGAIN || errno == EWOULDBLOCK) {
                         break;
@@ -853,12 +1087,16 @@ void http_server_run(http_server_t *srv) {
                     break;
                 }
 
+                char peer[MAX_PEER_ADDR_BYTES];
+                http_format_peer_addr((const struct sockaddr *)&peer_addr,
+                                      peer_len, peer, sizeof(peer));
+
                 pthread_mutex_lock(&srv->mu);
                 if (srv->queue.count >= QUEUE_CAPACITY) {
                     pthread_mutex_unlock(&srv->mu);
                     log_error("Connection queue full (%d/%d), rejecting client "
-                              "with 503",
-                              QUEUE_CAPACITY, QUEUE_CAPACITY);
+                              "with 503 (from=%s)",
+                              QUEUE_CAPACITY, QUEUE_CAPACITY, peer);
                     (void)set_blocking_cloexec(client_fd);
                     struct timeval tv = {.tv_sec = 1, .tv_usec = 0};
                     (void)setsockopt(client_fd, SOL_SOCKET, SO_SNDTIMEO, &tv,
@@ -867,7 +1105,9 @@ void http_server_run(http_server_t *srv) {
                     close(client_fd);
                     continue;
                 }
-                srv->queue.fds[srv->queue.tail] = client_fd;
+                client_conn_t *slot = &srv->queue.items[srv->queue.tail];
+                slot->fd = client_fd;
+                memcpy(slot->peer, peer, sizeof(slot->peer));
                 srv->queue.tail = (srv->queue.tail + 1) % QUEUE_CAPACITY;
                 srv->queue.count++;
                 pthread_cond_signal(&srv->not_empty);
@@ -909,7 +1149,7 @@ void http_server_destroy(http_server_t *srv) {
     }
 
     while (srv->queue.count > 0) {
-        close(srv->queue.fds[srv->queue.head]);
+        close(srv->queue.items[srv->queue.head].fd);
         srv->queue.head = (srv->queue.head + 1) % QUEUE_CAPACITY;
         srv->queue.count--;
     }

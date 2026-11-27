@@ -39,7 +39,7 @@ void log_vwrite(log_level_t level, const char *fmt, va_list ap) {
         tag = "DEBUG";
     }
 
-    char msg[1024];
+    char msg[2048];
     int written = vsnprintf(msg, sizeof(msg), fmt, ap);
     if (written < 0) {
         (void)fprintf(stream, "[%s] (log formatting error)\n", tag);

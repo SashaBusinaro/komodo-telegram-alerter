@@ -2,6 +2,8 @@
 #include "http_server.h"
 #include "logging.h"
 
+#include <arpa/inet.h>
+#include <netinet/in.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -229,6 +231,47 @@ static void test_logging_preview_and_levels(void) {
     TEST_ASSERT(log_get_level() == LOG_LEVEL_INFO);
 }
 
+static void test_format_peer_addr(void) {
+    char buf[64];
+
+    struct sockaddr_in sin = {0};
+    sin.sin_family = AF_INET;
+    sin.sin_port = htons(8080);
+    TEST_ASSERT(inet_pton(AF_INET, "127.0.0.1", &sin.sin_addr) == 1);
+    http_format_peer_addr((const struct sockaddr *)&sin, sizeof(sin), buf,
+                          sizeof(buf));
+    TEST_ASSERT(strcmp(buf, "127.0.0.1:8080") == 0);
+
+    struct sockaddr_in6 sin6 = {0};
+    sin6.sin6_family = AF_INET6;
+    sin6.sin6_port = htons(443);
+    TEST_ASSERT(inet_pton(AF_INET6, "::1", &sin6.sin6_addr) == 1);
+    http_format_peer_addr((const struct sockaddr *)&sin6, sizeof(sin6), buf,
+                          sizeof(buf));
+    TEST_ASSERT(strcmp(buf, "[::1]:443") == 0);
+
+    struct sockaddr_in6 mapped = {0};
+    mapped.sin6_family = AF_INET6;
+    mapped.sin6_port = htons(54321);
+    TEST_ASSERT(inet_pton(AF_INET6, "::ffff:192.0.2.15", &mapped.sin6_addr) ==
+                1);
+    http_format_peer_addr((const struct sockaddr *)&mapped, sizeof(mapped), buf,
+                          sizeof(buf));
+    TEST_ASSERT(strcmp(buf, "192.0.2.15:54321") == 0);
+
+    http_format_peer_addr(NULL, 0, buf, sizeof(buf));
+    TEST_ASSERT(strcmp(buf, "unknown") == 0);
+
+    struct sockaddr unspec = {0};
+    unspec.sa_family = AF_UNSPEC;
+    http_format_peer_addr(&unspec, sizeof(unspec), buf, sizeof(buf));
+    TEST_ASSERT(strcmp(buf, "unknown") == 0);
+
+    http_format_peer_addr((const struct sockaddr *)&sin, sizeof(sin) - 1, buf,
+                          sizeof(buf));
+    TEST_ASSERT(strcmp(buf, "unknown") == 0);
+}
+
 static void test_validation_boundaries(void) {
     /* Token max length: 128 bytes allowed, 129 rejected */
     char tok128[129];
@@ -362,6 +405,7 @@ int main(void) {
     test_query_param_boundaries();
     test_deep_and_large_json_formatting();
     test_logging_preview_and_levels();
+    test_format_peer_addr();
     printf("All test_alert checks passed!\n");
     return 0;
 }
