@@ -97,6 +97,7 @@ def main():
     env["BIND_ADDR"] = "127.0.0.1"
     env["TELEGRAM_API_URL"] = f"http://127.0.0.1:{tg_port}"
     env["MAX_BODY_BYTES"] = "4096"
+    env["LOG_LEVEL"] = "debug"
     env.pop("HTTPS_PROXY", None)
     env.pop("https_proxy", None)
     env.pop("HTTP_PROXY", None)
@@ -334,9 +335,13 @@ def main():
             t.join(timeout=5)
         assert rc == 0, f"Expected exit 0 on SIGTERM under load, got {rc}"
 
-        # Ensure bot token was never leaked and no sanitizer errors were emitted
+        # Ensure bot token was never leaked, verbose diagnostics emitted, and no sanitizer errors
         stdout, stderr = proc.communicate(timeout=5)
         assert "ABC_def-1" not in stdout and "ABC_def-1" not in stderr
+        assert "Invalid JSON payload:" in stderr, stderr
+        assert "at byte offset" in stderr, stderr
+        assert "preview=" in stderr, stderr
+        assert "[DEBUG]" in stdout, stdout
         for marker in (
             "AddressSanitizer",
             "UndefinedBehaviorSanitizer",

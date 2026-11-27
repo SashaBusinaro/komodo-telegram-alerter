@@ -1,5 +1,6 @@
 #include "alert.h"
 #include "http_server.h"
+#include "logging.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -180,16 +181,52 @@ static void test_level_emojis_and_defaults(void) {
 }
 
 static void test_invalid_json_inputs(void) {
-    char err[128] = {0};
+    char err[256] = {0};
 
     TEST_ASSERT(format_komodo_alert(NULL, 0, err, sizeof(err)) == NULL);
+    TEST_ASSERT(strstr(err, "empty request body") != NULL);
+
     TEST_ASSERT(format_komodo_alert("", 0, err, sizeof(err)) == NULL);
+    TEST_ASSERT(strstr(err, "empty request body") != NULL);
+
     TEST_ASSERT(format_komodo_alert("{bad", 4, err, sizeof(err)) == NULL);
+    TEST_ASSERT(strstr(err, "at byte offset") != NULL);
+
     TEST_ASSERT(format_komodo_alert("[]", 2, err, sizeof(err)) == NULL);
+    TEST_ASSERT(strstr(err, "expected JSON object, got array") != NULL);
+
     TEST_ASSERT(format_komodo_alert("\"str\"", 5, err, sizeof(err)) == NULL);
+    TEST_ASSERT(strstr(err, "expected JSON object, got string") != NULL);
+
     TEST_ASSERT(format_komodo_alert("{}{}", 4, err, sizeof(err)) == NULL);
+    TEST_ASSERT(strstr(err, "at byte offset 2") != NULL);
+
     TEST_ASSERT(format_komodo_alert("{} garbage", 10, err, sizeof(err)) ==
                 NULL);
+    TEST_ASSERT(strstr(err, "at byte offset 3") != NULL);
+}
+
+static void test_logging_preview_and_levels(void) {
+    char out[64];
+    const char *raw = "a\nb\rc\td\"e\\f\x01\x7fg";
+    log_format_preview(raw, strlen(raw), out, sizeof(out));
+    TEST_ASSERT(strcmp(out, "a\\nb\\rc\\td\\\"e\\\\f??g") == 0);
+
+    char trunc[6];
+    log_format_preview("abcdef", 6, trunc, sizeof(trunc));
+    TEST_ASSERT(strcmp(trunc, "ab...") == 0);
+
+    /* Ensure truncation never leaves a trailing odd backslash before "..." */
+    char bs_edge[6];
+    log_format_preview("a\nbcdef", 7, bs_edge, sizeof(bs_edge));
+    TEST_ASSERT(strcmp(bs_edge, "a...") == 0);
+
+    log_set_level(LOG_LEVEL_DEBUG);
+    TEST_ASSERT(log_get_level() == LOG_LEVEL_DEBUG);
+    log_set_level(LOG_LEVEL_ERROR);
+    TEST_ASSERT(log_get_level() == LOG_LEVEL_ERROR);
+    log_set_level(LOG_LEVEL_INFO);
+    TEST_ASSERT(log_get_level() == LOG_LEVEL_INFO);
 }
 
 static void test_validation_boundaries(void) {
@@ -324,6 +361,7 @@ int main(void) {
     test_validation_boundaries();
     test_query_param_boundaries();
     test_deep_and_large_json_formatting();
+    test_logging_preview_and_levels();
     printf("All test_alert checks passed!\n");
     return 0;
 }

@@ -103,6 +103,7 @@ add_library(alerter_core STATIC
     src/alert.c
     src/telegram.c
     src/http_server.c
+    src/logging.c
 )
 
 target_include_directories(alerter_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
@@ -178,6 +179,7 @@ set(ALERTER_LINT_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/alert.c
     ${CMAKE_CURRENT_SOURCE_DIR}/src/config.c
     ${CMAKE_CURRENT_SOURCE_DIR}/src/http_server.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/logging.c
     ${CMAKE_CURRENT_SOURCE_DIR}/src/main.c
     ${CMAKE_CURRENT_SOURCE_DIR}/src/telegram.c
 )

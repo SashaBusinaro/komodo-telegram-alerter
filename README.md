@@ -197,6 +197,7 @@ Pre-built images and local Docker Buildx targets support both `amd64` and Raspbe
 | `WORKER_THREADS` | `4` | `1..32` | Fixed worker thread pool size |
 | `CONNECT_TIMEOUT_MS` | `5000` | `100..60000` | Outbound TCP/TLS connect timeout |
 | `REQUEST_TIMEOUT_MS` | `15000` | `500..120000` | Outbound Telegram API request timeout |
+| `LOG_LEVEL` | `info` | `error` \| `info` \| `debug` | Minimum log verbosity (bot tokens are never logged) |
 
 ### Healthcheck
 

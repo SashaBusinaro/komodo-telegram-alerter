@@ -1,6 +1,8 @@
 #ifndef KOMODO_ALERTER_CONFIG_H
 #define KOMODO_ALERTER_CONFIG_H
 
+#include "logging.h"
+
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -15,6 +17,7 @@ typedef struct {
     size_t worker_threads;
     long connect_timeout_ms;
     long request_timeout_ms;
+    log_level_t log_level;
 } app_config_t;
 
 /**

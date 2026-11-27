@@ -2,6 +2,7 @@
 
 #include <ctype.h>
 #include <json-c/json.h>
+#include <limits.h>
 #include <math.h>
 #include <stdarg.h>
 #include <stdint.h>
@@ -11,8 +12,22 @@
 
 static void set_err(char *err_buf, size_t err_buf_len, const char *msg) {
     if (err_buf != NULL && err_buf_len > 0) {
-        snprintf(err_buf, err_buf_len, "%s", msg);
+        (void)snprintf(err_buf, err_buf_len, "%s", msg);
     }
+}
+
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((format(printf, 3, 4)))
+#endif
+static void set_err_fmt(char *err_buf, size_t err_buf_len, const char *fmt,
+                        ...) {
+    if (err_buf == NULL || err_buf_len == 0) {
+        return;
+    }
+    va_list ap;
+    va_start(ap, fmt);
+    (void)vsnprintf(err_buf, err_buf_len, fmt, ap);
+    va_end(ap);
 }
 
 bool validate_telegram_token(const char *token) {
@@ -379,13 +394,18 @@ static const char *level_to_emoji(const char *level) {
 char *format_komodo_alert(const char *json_body, size_t body_len, char *err_buf,
                           size_t err_buf_len) {
     if (json_body == NULL || body_len == 0) {
-        set_err(err_buf, err_buf_len, "Invalid JSON payload");
+        set_err(err_buf, err_buf_len, "empty request body (0 bytes)");
+        return NULL;
+    }
+    if (body_len > (size_t)INT_MAX) {
+        set_err_fmt(err_buf, err_buf_len, "request body too large (%zu bytes)",
+                    body_len);
         return NULL;
     }
 
     struct json_tokener *tok = json_tokener_new();
     if (tok == NULL) {
-        set_err(err_buf, err_buf_len, "Out of memory");
+        set_err(err_buf, err_buf_len, "out of memory allocating JSON tokener");
         return NULL;
     }
     json_tokener_set_flags(tok, JSON_TOKENER_STRICT);
@@ -400,7 +420,8 @@ char *format_komodo_alert(const char *json_body, size_t body_len, char *err_buf,
         if (root != NULL) {
             json_object_put(root);
         }
-        set_err(err_buf, err_buf_len, "Invalid JSON payload");
+        set_err_fmt(err_buf, err_buf_len, "%s at byte offset %zu of %zu",
+                    json_tokener_error_desc(jerr), parsed_end, body_len);
         return NULL;
     }
 
@@ -408,14 +429,19 @@ char *format_komodo_alert(const char *json_body, size_t body_len, char *err_buf,
         unsigned char c = (unsigned char)json_body[i];
         if (c != ' ' && c != '\t' && c != '\n' && c != '\r') {
             json_object_put(root);
-            set_err(err_buf, err_buf_len, "Invalid JSON payload");
+            set_err_fmt(err_buf, err_buf_len,
+                        "unexpected trailing data at byte offset %zu of %zu", i,
+                        body_len);
             return NULL;
         }
     }
 
     if (!json_object_is_type(root, json_type_object)) {
+        const char *type_name = json_type_to_name(json_object_get_type(root));
         json_object_put(root);
-        set_err(err_buf, err_buf_len, "Invalid JSON payload");
+        set_err_fmt(err_buf, err_buf_len,
+                    "expected JSON object, got %s (%zu bytes)",
+                    type_name != NULL ? type_name : "unknown", body_len);
         return NULL;
     }
 
@@ -478,7 +504,9 @@ char *format_komodo_alert(const char *json_body, size_t body_len, char *err_buf,
 
     if (!ok) {
         free(sb.data);
-        set_err(err_buf, err_buf_len, "Out of memory");
+        set_err(err_buf, err_buf_len,
+                "failed to format alert data (nesting depth exceeded or out of "
+                "memory)");
         return NULL;
     }
 

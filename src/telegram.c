@@ -182,15 +182,17 @@ telegram_status_t telegram_send_message(telegram_client_t *client,
     }
 
     CURLcode rc = curl_easy_perform(curl);
+    long http_code = 0;
+    (void)curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
 
     /* Clear URL containing token from stack and free request JSON payload */
     memset(url, 0, sizeof(url));
     json_object_put(payload);
 
     if (rc != CURLE_OK || resp.overflow || resp.data == NULL) {
-        log_error("Failed to send message to Telegram: %s",
-                  resp.overflow ? "response too large"
-                                : curl_easy_strerror(rc));
+        log_error("Failed to send message to Telegram: %s (curl=%d, http=%ld)",
+                  resp.overflow ? "response too large" : curl_easy_strerror(rc),
+                  (int)rc, http_code);
         free(resp.data);
         set_err(err_buf, err_buf_len, "Failed to send message to Telegram");
         return TELEGRAM_ERR_NETWORK;
@@ -206,23 +208,29 @@ telegram_status_t telegram_send_message(telegram_client_t *client,
         json_tokener_parse_ex(tok, resp.data, (int)resp.len);
     enum json_tokener_error jerr = json_tokener_get_error(tok);
     json_tokener_free(tok);
-    free(resp.data);
 
     if (jerr != json_tokener_success || resp_json == NULL ||
         !json_object_is_type(resp_json, json_type_object)) {
         if (resp_json != NULL) {
             json_object_put(resp_json);
         }
-        log_error("Failed to send message to Telegram: invalid JSON response");
+        char preview[201];
+        log_format_preview(resp.data, resp.len, preview, sizeof(preview));
+        free(resp.data);
+        log_error("Failed to send message to Telegram: invalid JSON response "
+                  "(http=%ld, %zu bytes, %s, preview=\"%s\")",
+                  http_code, resp.len, json_tokener_error_desc(jerr), preview);
         set_err(err_buf, err_buf_len, "Failed to send message to Telegram");
         return TELEGRAM_ERR_NETWORK;
     }
+    free(resp.data);
 
     struct json_object *ok_obj = NULL;
     if (json_object_object_get_ex(resp_json, "ok", &ok_obj) && ok_obj != NULL &&
         json_object_is_type(ok_obj, json_type_boolean) &&
         json_object_get_boolean(ok_obj)) {
         json_object_put(resp_json);
+        log_debug("Telegram API sendMessage succeeded (http=%ld)", http_code);
         return TELEGRAM_OK;
     }
 
@@ -236,7 +244,7 @@ telegram_status_t telegram_send_message(telegram_client_t *client,
         }
     }
 
-    log_error("Telegram API error: %s", desc);
+    log_error("Telegram API error (http=%ld): %s", http_code, desc);
     set_err(err_buf, err_buf_len, desc);
     json_object_put(resp_json);
     return TELEGRAM_ERR_API;

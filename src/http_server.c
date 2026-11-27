@@ -4,6 +4,7 @@
 #include "telegram.h"
 
 #include <arpa/inet.h>
+#include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <json-c/json.h>
@@ -245,6 +246,12 @@ typedef struct {
     char url[MAX_URL_BYTES + 1];
     size_t url_len;
     size_t header_bytes;
+    char content_type[65];
+    size_t content_type_len;
+    char header_name[16];
+    size_t header_name_len;
+    bool header_field_started;
+    bool capture_content_type;
     char *body;
     size_t body_len;
     size_t body_cap;
@@ -264,14 +271,58 @@ static int on_url_cb(llhttp_t *parser, const char *at, size_t length) {
     return 0;
 }
 
-static int on_header_bytes_cb(llhttp_t *parser, const char *at, size_t length) {
-    (void)at;
+static int on_header_field_cb(llhttp_t *parser, const char *at, size_t length) {
     req_ctx_t *ctx = (req_ctx_t *)parser->data;
     if (length > MAX_HEADER_BYTES - ctx->header_bytes) {
         ctx->error_status = 431;
         return HPE_USER;
     }
     ctx->header_bytes += length;
+
+    if (!ctx->header_field_started) {
+        ctx->header_name_len = 0;
+        ctx->capture_content_type = false;
+        ctx->header_field_started = true;
+    }
+    for (size_t i = 0;
+         i < length && ctx->header_name_len + 1 < sizeof(ctx->header_name);
+         i++) {
+        ctx->header_name[ctx->header_name_len++] =
+            (char)tolower((unsigned char)at[i]);
+    }
+    return 0;
+}
+
+static int on_header_field_complete_cb(llhttp_t *parser) {
+    req_ctx_t *ctx = (req_ctx_t *)parser->data;
+    ctx->header_field_started = false;
+    ctx->capture_content_type =
+        (ctx->header_name_len == 12 &&
+         memcmp(ctx->header_name, "content-type", 12) == 0);
+    if (ctx->capture_content_type) {
+        ctx->content_type_len = 0;
+        ctx->content_type[0] = '\0';
+    }
+    return 0;
+}
+
+static int on_header_value_cb(llhttp_t *parser, const char *at, size_t length) {
+    req_ctx_t *ctx = (req_ctx_t *)parser->data;
+    if (length > MAX_HEADER_BYTES - ctx->header_bytes) {
+        ctx->error_status = 431;
+        return HPE_USER;
+    }
+    ctx->header_bytes += length;
+
+    if (ctx->capture_content_type) {
+        size_t avail = sizeof(ctx->content_type) - 1 - ctx->content_type_len;
+        size_t to_copy = length < avail ? length : avail;
+        if (to_copy > 0) {
+            memcpy(ctx->content_type + ctx->content_type_len, at, to_copy);
+            ctx->content_type_len += to_copy;
+            ctx->content_type[ctx->content_type_len] = '\0';
+        }
+    }
     return 0;
 }
 
@@ -346,21 +397,31 @@ static void handle_alert_request(int fd, const req_ctx_t *ctx,
         !http_query_get_param(query, query_len, "chat_id", chat_id,
                               sizeof(chat_id), &has_chat_id)) {
         memset(token, 0, sizeof(token));
+        log_error("Invalid query encoding on POST /alert (query_len=%zu)",
+                  query_len);
         send_json_error(fd, 400, "Invalid query encoding");
         return;
     }
 
-    if (!has_token || !has_chat_id || token[0] == '\0' || chat_id[0] == '\0') {
+    bool missing_token = !has_token || token[0] == '\0';
+    bool missing_chat = !has_chat_id || chat_id[0] == '\0';
+    if (missing_token || missing_chat) {
         memset(token, 0, sizeof(token));
-        log_error("Missing token or chat_id");
+        log_error("Missing required query parameter(s):%s%s",
+                  missing_token ? " token" : "",
+                  missing_chat ? " chat_id" : "");
         send_json_error(fd, 400, "Missing token or chat_id");
         return;
     }
 
-    if (!validate_telegram_token(token) ||
-        !validate_telegram_chat_id(chat_id)) {
+    bool token_ok = validate_telegram_token(token);
+    bool chat_ok = validate_telegram_chat_id(chat_id);
+    if (!token_ok || !chat_ok) {
         memset(token, 0, sizeof(token));
-        log_error("Invalid token or chat_id");
+        log_error("Invalid query parameter format:%s%s",
+                  !token_ok ? " token (expected <digits>:<secret>)" : "",
+                  !chat_ok ? " chat_id (expected numeric ID or @username)"
+                           : "");
         send_json_error(fd, 400, "Invalid token or chat_id");
         return;
     }
@@ -370,9 +431,17 @@ static void handle_alert_request(int fd, const req_ctx_t *ctx,
         format_komodo_alert(ctx->body, ctx->body_len, err_buf, sizeof(err_buf));
     if (message == NULL) {
         memset(token, 0, sizeof(token));
-        log_error("Invalid JSON payload");
-        send_json_error(fd, 400,
-                        err_buf[0] != '\0' ? err_buf : "Invalid JSON payload");
+        char preview[201];
+        char ct_preview[65];
+        log_format_preview(ctx->body, ctx->body_len, preview, sizeof(preview));
+        log_format_preview(ctx->content_type, ctx->content_type_len, ct_preview,
+                           sizeof(ct_preview));
+        log_error(
+            "Invalid JSON payload: %s (body_len=%zu, content_type=\"%s\", "
+            "preview=\"%s\")",
+            err_buf[0] != '\0' ? err_buf : "parse failed", ctx->body_len,
+            ct_preview[0] != '\0' ? ct_preview : "(none)", preview);
+        send_json_error(fd, 400, "Invalid JSON payload");
         return;
     }
 
@@ -414,8 +483,9 @@ static bool read_and_parse_request(int fd, req_ctx_t *ctx,
     llhttp_settings_t settings;
     llhttp_settings_init(&settings);
     settings.on_url = on_url_cb;
-    settings.on_header_field = on_header_bytes_cb;
-    settings.on_header_value = on_header_bytes_cb;
+    settings.on_header_field = on_header_field_cb;
+    settings.on_header_field_complete = on_header_field_complete_cb;
+    settings.on_header_value = on_header_value_cb;
     settings.on_headers_complete = on_headers_complete_cb;
     settings.on_body = on_body_cb;
     settings.on_message_complete = on_message_complete_cb;
@@ -433,6 +503,8 @@ static bool read_and_parse_request(int fd, req_ctx_t *ctx,
         clock_gettime(CLOCK_MONOTONIC, &now_ts);
         if (now_ts.tv_sec - start_ts.tv_sec >= READ_DEADLINE_SEC) {
             ctx->error_status = 400;
+            log_error("HTTP request read deadline exceeded (%ds, body_len=%zu)",
+                      READ_DEADLINE_SEC, ctx->body_len);
             return false;
         }
 
@@ -441,6 +513,7 @@ static bool read_and_parse_request(int fd, req_ctx_t *ctx,
             if (errno == EINTR) {
                 continue;
             }
+            log_error("HTTP request read failed: %s", strerror(errno));
             return false;
         }
         if (n == 0) {
@@ -449,6 +522,9 @@ static bool read_and_parse_request(int fd, req_ctx_t *ctx,
                 *out_method = llhttp_get_method(&parser);
                 return true;
             }
+            log_error("HTTP request incomplete at EOF: %s (url_len=%zu, "
+                      "body_len=%zu)",
+                      llhttp_errno_name(ferr), ctx->url_len, ctx->body_len);
             return false;
         }
 
@@ -456,6 +532,19 @@ static bool read_and_parse_request(int fd, req_ctx_t *ctx,
         if (perr != HPE_OK) {
             if (ctx->error_status == 0) {
                 ctx->error_status = 400;
+            }
+            if (ctx->error_status == 413) {
+                log_error("HTTP request rejected (413): payload exceeds "
+                          "MAX_BODY_BYTES=%zu (content_length=%llu, "
+                          "body_len=%zu)",
+                          ctx->cfg->max_body_bytes,
+                          (unsigned long long)parser.content_length,
+                          ctx->body_len);
+            } else {
+                log_error("HTTP request parse error (%d): %s (url_len=%zu, "
+                          "header_bytes=%zu, body_len=%zu)",
+                          ctx->error_status, llhttp_errno_name(perr),
+                          ctx->url_len, ctx->header_bytes, ctx->body_len);
             }
             return false;
         }
@@ -510,19 +599,30 @@ static void dispatch_request(int fd, uint8_t method, const req_ctx_t *ctx,
     const char *query = qmark != NULL ? qmark + 1 : "";
     size_t query_len = qmark != NULL ? ctx->url_len - path_len - 1 : 0;
 
+    char path_preview[129];
+    log_format_preview(ctx->url, path_len, path_preview, sizeof(path_preview));
+    const char *method_str = llhttp_method_name((llhttp_method_t)method);
+    log_debug("Request: %s %s (body_len=%zu)", method_str, path_preview,
+              ctx->body_len);
+
     if (path_len == 7 && memcmp(ctx->url, "/health", 7) == 0) {
         if (method == HTTP_GET) {
             send_json_raw(fd, 200, "{\"status\":\"ok\"}");
         } else {
+            log_error("Method not allowed (405): %s %s", method_str,
+                      path_preview);
             send_json_error(fd, 405, "Method not allowed");
         }
     } else if (path_len == 6 && memcmp(ctx->url, "/alert", 6) == 0) {
         if (method == HTTP_POST) {
             handle_alert_request(fd, ctx, query, query_len, tg);
         } else {
+            log_error("Method not allowed (405): %s %s", method_str,
+                      path_preview);
             send_json_error(fd, 405, "Method not allowed");
         }
     } else {
+        log_error("Route not found (404): %s %s", method_str, path_preview);
         send_json_error(fd, 404, "Not found");
     }
 }
@@ -756,6 +856,9 @@ void http_server_run(http_server_t *srv) {
                 pthread_mutex_lock(&srv->mu);
                 if (srv->queue.count >= QUEUE_CAPACITY) {
                     pthread_mutex_unlock(&srv->mu);
+                    log_error("Connection queue full (%d/%d), rejecting client "
+                              "with 503",
+                              QUEUE_CAPACITY, QUEUE_CAPACITY);
                     (void)set_blocking_cloexec(client_fd);
                     struct timeval tv = {.tv_sec = 1, .tv_usec = 0};
                     (void)setsockopt(client_fd, SOL_SOCKET, SO_SNDTIMEO, &tv,

@@ -1,9 +1,21 @@
 #include "config.h"
 #include "logging.h"
 
+#include <ctype.h>
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
+
+static bool equals_ascii_icase(const char *a, const char *b) {
+    while (*a != '\0' && *b != '\0') {
+        if (tolower((unsigned char)*a) != tolower((unsigned char)*b)) {
+            return false;
+        }
+        a++;
+        b++;
+    }
+    return *a == '\0' && *b == '\0';
+}
 
 static bool parse_long_env(const char *name, long default_val, long min_val,
                            long max_val, long *out) {
@@ -118,6 +130,20 @@ bool config_load_from_env(app_config_t *cfg) {
     }
     if (!parse_long_env("REQUEST_TIMEOUT_MS", 15000, 500, 120000,
                         &cfg->request_timeout_ms)) {
+        return false;
+    }
+
+    const char *raw_level = getenv("LOG_LEVEL");
+    if (raw_level == NULL || raw_level[0] == '\0' ||
+        equals_ascii_icase(raw_level, "info")) {
+        cfg->log_level = LOG_LEVEL_INFO;
+    } else if (equals_ascii_icase(raw_level, "error")) {
+        cfg->log_level = LOG_LEVEL_ERROR;
+    } else if (equals_ascii_icase(raw_level, "debug")) {
+        cfg->log_level = LOG_LEVEL_DEBUG;
+    } else {
+        log_error("Invalid LOG_LEVEL: '%s' (expected error, info, or debug)",
+                  raw_level);
         return false;
     }
 

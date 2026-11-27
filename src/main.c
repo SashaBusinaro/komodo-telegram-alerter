@@ -29,6 +29,7 @@ int main(void) {
     if (!config_load_from_env(&cfg)) {
         return EXIT_FAILURE;
     }
+    log_set_level(cfg.log_level);
 
     if (curl_global_init(CURL_GLOBAL_DEFAULT) != CURLE_OK) {
         log_error("Failed to initialize libcurl");
