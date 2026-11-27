@@ -27,9 +27,17 @@ Thumbs.db
 # Container build / compose files
 Dockerfile*
 Containerfile*
+docker-bake.hcl
 .dockerignore
 .containerignore
 compose*.yaml
 compose*.yml
 docker-compose*.yaml
 docker-compose*.yml
+
+# CI / editor / static analysis metadata
+.github/
+.cache/
+.clang-format
+.clang-tidy
+CMakePresets.json

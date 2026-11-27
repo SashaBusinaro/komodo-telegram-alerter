@@ -31,6 +31,27 @@ endif()
 find_package(CURL REQUIRED)
 find_package(Threads REQUIRED)
 
+include(CheckCSourceCompiles)
+set(_ALERTER_ATOMIC_TEST_SRC "
+#include <stdatomic.h>
+int main(void) {
+    atomic_bool b = ATOMIC_VAR_INIT(0);
+    _Atomic(void *) p = (void *)0;
+    atomic_store(&b, 1);
+    atomic_store(&p, (void *)1);
+    return (int)atomic_load(&b) + (atomic_load(&p) != (void *)0 ? 0 : 1);
+}
+")
+check_c_source_compiles("${_ALERTER_ATOMIC_TEST_SRC}" ALERTER_HAVE_BUILTIN_ATOMICS)
+if(NOT ALERTER_HAVE_BUILTIN_ATOMICS)
+    set(CMAKE_REQUIRED_LIBRARIES atomic)
+    check_c_source_compiles("${_ALERTER_ATOMIC_TEST_SRC}" ALERTER_HAVE_LIBATOMIC)
+    unset(CMAKE_REQUIRED_LIBRARIES)
+    if(ALERTER_HAVE_LIBATOMIC)
+        set(ALERTER_ATOMIC_LIB atomic)
+    endif()
+endif()
+
 find_package(json-c CONFIG QUIET)
 if(NOT TARGET json-c::json-c)
     find_path(JSON_C_INCLUDE_DIR
@@ -90,6 +111,7 @@ target_link_libraries(alerter_core PUBLIC
     json-c::json-c
     ${LLHTTP_TARGET}
     Threads::Threads
+    ${ALERTER_ATOMIC_LIB}
     alerter_sanitizers
 )
 

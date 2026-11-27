@@ -27,7 +27,7 @@ Create a new Stack with the following `compose.yaml` file:
 services:
   komodo-telegram-alerter:
     container_name: komodo-telegram-alerter
-    image: sashabusinaro/komodo-telegram-alerter:latest
+    image: ghcr.io/timoschenko/komodo-telegram-alerter:latest
     restart: unless-stopped
     user: '10001:10001'
     read_only: true
@@ -55,7 +55,7 @@ services:
 services:
   komodo-telegram-alerter:
     container_name: komodo-telegram-alerter
-    image: sashabusinaro/komodo-telegram-alerter:latest
+    image: ghcr.io/timoschenko/komodo-telegram-alerter:latest
     restart: unless-stopped
     user: '10001:10001'
     read_only: true
@@ -111,7 +111,7 @@ Example with Docker Compose:
 ```yaml
 services:
   komodo-telegram-alerter:
-    image: sashabusinaro/komodo-telegram-alerter:latest
+    image: ghcr.io/timoschenko/komodo-telegram-alerter:latest
     restart: unless-stopped
     user: '10001:10001'
     read_only: true
@@ -145,13 +145,43 @@ podman run -d --name komodo-telegram-alerter \
   --pids-limit=64 \
   --user 10001:10001 \
   -p 3000:3000 \
-  docker.io/sashabusinaro/komodo-telegram-alerter:latest
+  ghcr.io/timoschenko/komodo-telegram-alerter:latest
 ```
 
 You can also pass `--userns=keep-id` instead of `--user 10001:10001`, or run the provided `compose.yaml` with `podman compose up -d`.
 
 - **Building with Podman**: Use `podman build --format docker -t komodo-telegram-alerter .` to preserve the Dockerfile `HEALTHCHECK` instruction (Podman's default `--format oci` omits `HEALTHCHECK` and relies on `compose.yaml` or Kubernetes probes).
 - **Reboot persistence**: In rootless Podman, `restart: unless-stopped` requires systemd integration (such as Podman Quadlet or enabling `podman-restart.service`) to auto-start containers across host reboots.
+
+### Multi-Architecture & Raspberry Pi
+
+Pre-built images and local Docker Buildx targets support both `amd64` and Raspberry Pi ARM platforms:
+
+| Device / OS | Docker Platform | Bake Target |
+| --- | --- | --- |
+| Raspberry Pi 5 / 4 / 3 / Zero 2 W (64-bit OS) | `linux/arm64` | `rpi64` |
+| Raspberry Pi 4 / 3 / 2 (32-bit OS) | `linux/arm/v7` | `rpi32` |
+| Raspberry Pi Zero / Zero W / Pi 1 (32-bit OS) | `linux/arm/v6` | `rpi-zero` |
+| x86_64 servers / desktops | `linux/amd64` | `default` |
+
+- **Build natively on a Raspberry Pi**:
+  ```sh
+  docker build -t komodo-telegram-alerter:local .
+  ```
+- **Cross-build a single architecture locally** (loads into local Docker engine):
+  ```sh
+  docker buildx build --platform linux/arm64 --load -t komodo-telegram-alerter:arm64 .
+  ```
+- **Cross-build using `docker-bake.hcl`**:
+  ```sh
+  docker buildx bake -f docker-bake.hcl rpi64 --load   # single target loaded locally
+  docker buildx bake -f docker-bake.hcl rpi --push     # all Raspberry Pi targets (arm64, arm/v7, arm/v6)
+  docker buildx bake -f docker-bake.hcl --push         # default multi-arch manifest (amd64, arm64, arm/v7)
+  ```
+- **32-bit ARM (`linux/arm/v7`, `linux/arm/v6`) emulation note**: If your build host (such as Docker Desktop on Apple Silicon) does not have 32-bit ARM binfmt registered, register QEMU handlers first:
+  ```sh
+  docker run --privileged --rm tonistiigi/binfmt --install arm
+  ```
 
 ---
 

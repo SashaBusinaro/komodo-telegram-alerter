@@ -1,4 +1,4 @@
-FROM alpine:3.21 AS builder
+FROM docker.io/library/alpine:3.21 AS builder
 
 RUN apk add --no-cache \
     build-base \
@@ -19,6 +19,8 @@ FROM docker.io/library/alpine:3.21
 
 LABEL org.opencontainers.image.title="komodo-telegram-alerter" \
       org.opencontainers.image.description="Lightweight, security-hardened Telegram alerter for Komodo" \
+      org.opencontainers.image.source="https://github.com/timoschenko/komodo-telegram-alerter" \
+      org.opencontainers.image.url="https://github.com/timoschenko/komodo-telegram-alerter" \
       org.opencontainers.image.licenses="MIT"
 
 ARG APP_UID=10001
