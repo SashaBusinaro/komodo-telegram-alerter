@@ -1,48 +1,35 @@
-# Dependencies
-node_modules
-npm-debug.log*
-
-# Environment files
-.env
-.env.local
-.env.*.local
+# Build artifacts
+build/
+cmake-build-*/
 
 # Git
 .git
 .gitignore
 
-# Documentation
+# Tests and docs
+tests/
 README.md
 *.md
 
-# IDE files
+# IDE / OS / local tool metadata
 .vscode
 .idea
+.nodeterm/
 *.swp
 *.swo
-
-# OS files
 .DS_Store
 Thumbs.db
 
-# Logs
-logs
-*.log
+# Environment files
+.env
+.env.*
 
-# Runtime data
-pids
-*.pid
-*.seed
-*.pid.lock
-
-# Optional npm cache directory
-.npm
-
-# Optional REPL history
-.node_repl_history
-
-# Output of 'npm pack'
-*.tgz
-
-# Yarn Integrity file
-.yarn-integrity
+# Container build / compose files
+Dockerfile*
+Containerfile*
+.dockerignore
+.containerignore
+compose*.yaml
+compose*.yml
+docker-compose*.yaml
+docker-compose*.yml

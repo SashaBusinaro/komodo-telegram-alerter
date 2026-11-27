@@ -1,20 +1,47 @@
-FROM node:22-alpine
+FROM alpine:3.21 AS builder
 
-RUN addgroup -S app && adduser -S app -G app
+RUN apk add --no-cache \
+    build-base \
+    cmake \
+    curl-dev \
+    json-c-dev \
+    llhttp-dev
 
-WORKDIR /app
+WORKDIR /src
+COPY CMakeLists.txt ./
+COPY src ./src
 
-COPY src/package*.json ./
+RUN cmake -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF && \
+    cmake --build build --parallel && \
+    strip build/komodo-telegram-alerter
 
-RUN npm ci --omit=dev --ignore-scripts && \
-    npm cache clean --force
+FROM docker.io/library/alpine:3.21
 
-COPY src/server.js ./
+LABEL org.opencontainers.image.title="komodo-telegram-alerter" \
+      org.opencontainers.image.description="Lightweight, security-hardened Telegram alerter for Komodo" \
+      org.opencontainers.image.licenses="MIT"
 
-RUN chown -R app:app /app
+ARG APP_UID=10001
+ARG APP_GID=10001
 
-USER app
+RUN apk add --no-cache \
+    libcurl \
+    json-c \
+    llhttp \
+    ca-certificates && \
+    addgroup -g "${APP_GID}" -S app && \
+    adduser -u "${APP_UID}" -S -H -D -s /sbin/nologin -G app app && \
+    find / -xdev -perm /6000 -type f -exec chmod a-s {} +
+
+COPY --from=builder --chown=0:0 --chmod=0555 /src/build/komodo-telegram-alerter /usr/local/bin/komodo-telegram-alerter
+
+WORKDIR /
+
+USER 10001:10001
 
 EXPOSE 3000
 
-CMD ["node", "server.js"]
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+    CMD wget -q -O /dev/null "http://127.0.0.1:${PORT:-3000}/health" || exit 1
+
+ENTRYPOINT ["/usr/local/bin/komodo-telegram-alerter"]

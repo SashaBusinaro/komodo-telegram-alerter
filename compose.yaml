@@ -4,5 +4,20 @@ services:
     image: sashabusinaro/komodo-telegram-alerter:latest
     container_name: komodo-telegram-alerter
     restart: unless-stopped
+    user: '10001:10001'
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 64
     ports:
       - '3000:3000'
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - unset http_proxy HTTP_PROXY https_proxy HTTPS_PROXY all_proxy ALL_PROXY && wget -q -T 2 -O /dev/null "http://127.0.0.1:$${PORT:-3000}/health" || exit 1
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
